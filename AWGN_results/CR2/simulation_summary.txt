@@ -1,0 +1,20 @@
+Simulation Summary
+==================
+
+Parameters:
+Delay Profile: TDL-A
+Delay Spread: 0.00e+00 s
+Maximum Doppler Shift: 0.0 Hz
+NTxAnts: 1, NRxAnts: 1
+NFrames: 1000
+Total Slots: 20000
+Modulation: 64QAM
+HARQ: nan
+
+Results:
+SNR (dB)	Throughput (Mbps)	BLER
+9.50		0.0412		9.99e-01
+9.88		17.1212		5.22e-01
+10.25		34.9291		2.59e-02
+10.62		35.8452		3.00e-04
+11.00		35.8560		0.00e+00

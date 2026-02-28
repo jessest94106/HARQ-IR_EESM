@@ -1,0 +1,20 @@
+Simulation Summary
+==================
+
+Parameters:
+Delay Profile: CDL-C
+Delay Spread: 3.00e-07 s
+Maximum Doppler Shift: 100.0 Hz
+NTxAnts: 1, NRxAnts: 1
+NFrames: 1000
+Total Slots: 20000
+Modulation: 64QAM
+HARQ: IR
+
+Results:
+SNR (dB)	Throughput (Mbps)	BLER
+0.00		0.5307		9.93e-01
+12.46		36.1034		4.97e-01
+22.50		67.1547		6.35e-02
+26.25		70.8443		1.21e-02
+30.00		71.6726		5.50e-04

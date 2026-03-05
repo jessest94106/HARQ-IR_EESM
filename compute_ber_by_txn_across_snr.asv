@@ -1,0 +1,200 @@
+% =========================================================================
+% Compute error probability conditioned on Tx index n across all SNR files
+%
+% Output for Tx n = 0..3:
+%   1) P(Tx = n) across all SNR files
+%   2) Error probability given Tx=n
+%
+% Note:
+%   retransInfo in this project does not include bit-error counts.
+%   So this script uses "errorState" as packet error indicator (BLER proxy).
+% =========================================================================
+
+clear; clc;c
+
+%% 1) Locate latest IR folder
+manual_ir_folder = '';
+ir_root_candidates = {'./results', './result'};
+ir_root = '';
+for i = 1:numel(ir_root_candidates)
+    if exist(ir_root_candidates{i}, 'dir')
+        ir_root = ir_root_candidates{i};
+        break;
+    end
+end
+if isempty(ir_root)
+    error('Neither ./results nor ./result exists.');
+end
+
+if isempty(manual_ir_folder)
+    ir_folder = findLatestIrFolder(ir_root);
+else
+    ir_folder = manual_ir_folder;
+end
+fprintf('IR folder: %s\n', ir_folder);
+
+summary_file = fullfile(ir_folder, 'simulation_summary.txt');
+if ~exist(summary_file, 'file')
+    error('Missing summary file: %s', summary_file);
+end
+snr_points = parseSummarySNR(summary_file);
+fprintf('SNR points in summary: %s\n', mat2str(snr_points', 4));
+
+%% 2) Load retrans files and accumulate by Tx n
+matFiles = dir(fullfile(ir_folder, 'retrans_snr_*.mat'));
+if isempty(matFiles)
+    error('No retrans_snr_*.mat files in %s', ir_folder);
+end
+
+file_idx = inf(numel(matFiles), 1);
+for i = 1:numel(matFiles)
+    tok = regexp(matFiles(i).name, 'retrans_snr_(\d+)\.mat', 'tokens', 'once');
+    if ~isempty(tok)
+        file_idx(i) = str2double(tok{1});
+    end
+end
+[file_idx, ord] = sort(file_idx);
+matFiles = matFiles(ord);
+
+target_n = 0:3;
+n_count = zeros(numel(target_n), 1);
+n_err = zeros(numel(target_n), 1);
+total_samples = 0;
+
+for i = 1:numel(matFiles)
+    fpath = fullfile(ir_folder, matFiles(i).name);
+    d = load(fpath);
+    if ~isfield(d, 'retransInfo')
+        warning('Skipping %s (missing retransInfo).', matFiles(i).name);
+        continue;
+    end
+
+    entries = d.retransInfo(:);
+    retrans_num = [entries.retransNum]';
+    err_state = [entries.errorState]';
+
+    total_samples = total_samples + numel(retrans_num);
+
+    for k = 1:numel(target_n)
+        n = target_n(k);
+        idx_n = (retrans_num == n);
+        n_count(k) = n_count(k) + sum(idx_n);
+        n_err(k) = n_err(k) + sum(err_state(idx_n) ~= 0);
+    end
+
+    if i <= numel(snr_points)
+        snr_label = snr_points(i);
+    else
+        snr_label = NaN;
+    end
+    fprintf('Loaded %-20s | file_idx=%d | SNR=%.2f dB | samples=%d\n', ...
+            matFiles(i).name, file_idx(i), snr_label, numel(retrans_num));
+end
+
+if total_samples == 0
+    error('No retransmission samples were loaded.');
+end
+
+%% 3) Compute probabilities
+p_tx_n = n_count / total_samples;                     % P(Tx=n)
+err_prob_given_n = n_err ./ max(n_count, 1);         % proxy for BER|Tx=n (BLER|Tx=n)
+
+%% 4) Print result table
+fprintf('\n==============================================================\n');
+fprintf('Tx-index statistics across all SNR points (n = 0..3)\n');
+fprintf('Note: using errorState as error indicator (BLER proxy)\n');
+fprintf('--------------------------------------------------------------\n');
+fprintf('Tx n\tCount\tP(Tx=n)\t\tErrorProb|Tx=n\n');
+for k = 1:numel(target_n)
+    fprintf('%d\t%d\t%.8f\t%.8f\n', target_n(k), n_count(k), p_tx_n(k), err_prob_given_n(k));
+end
+fprintf('--------------------------------------------------------------\n');
+fprintf('Sum P(Tx=n), n=0..3: %.8f\n', sum(p_tx_n));
+fprintf('==============================================================\n');
+
+%% 5) Optional quick plot
+figure('Name', 'Tx n Probability and Error Probability', 'Position', [120 120 900 420]);
+t = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+nexttile(t, 1);
+bar(target_n, p_tx_n, 0.6);
+grid on;
+xlabel('Tx n', 'FontWeight', 'bold');
+ylabel('Probability', 'FontWeight', 'bold');
+title('P(Tx = n)', 'FontWeight', 'bold');
+set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+
+nexttile(t, 2);
+bar(target_n, err_prob_given_n, 0.6);
+grid on;
+xlabel('Tx n', 'FontWeight', 'bold');
+ylabel('Error Probability', 'FontWeight', 'bold');
+title('Error Probability | Tx n', 'FontWeight', 'bold');
+set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+
+title(t, 'Across All SNR Files', 'FontSize', 14, 'FontWeight', 'bold');
+
+
+% =========================================================================
+% Helper functions
+% =========================================================================
+
+function folder = findLatestIrFolder(rootDir)
+    d = dir(rootDir);
+    keep = false(numel(d), 1);
+    for i = 1:numel(d)
+        if ~d(i).isdir
+            continue;
+        end
+        name = d(i).name;
+        if strcmp(name, '.') || strcmp(name, '..') || ~contains(name, 'IR')
+            continue;
+        end
+        summary_ok = exist(fullfile(rootDir, name, 'simulation_summary.txt'), 'file') == 2;
+        mats_ok = ~isempty(dir(fullfile(rootDir, name, 'retrans_snr_*.mat')));
+        keep(i) = summary_ok && mats_ok;
+    end
+
+    d = d(keep);
+    if isempty(d)
+        error('No IR result folder with simulation_summary.txt and retrans_snr_*.mat under %s', rootDir);
+    end
+
+    [~, idx] = max([d.datenum]);
+    folder = fullfile(rootDir, d(idx).name);
+end
+
+function snrVec = parseSummarySNR(summaryFile)
+    fid = fopen(summaryFile, 'r');
+    if fid < 0
+        error('Cannot open file: %s', summaryFile);
+    end
+    cleaner = onCleanup(@() fclose(fid)); %#ok<NASGU>
+
+    lines = textscan(fid, '%s', 'Delimiter', '\n', 'Whitespace', '');
+    lines = lines{1};
+
+    snrVec = [];
+    inResults = false;
+    for i = 1:numel(lines)
+        line = strtrim(lines{i});
+        if contains(line, 'SNR (dB)')
+            inResults = true;
+            continue;
+        end
+        if ~inResults || isempty(line)
+            continue;
+        end
+
+        vals = sscanf(line, '%f');
+        if numel(vals) >= 3
+            snrVec(end+1,1) = vals(1); %#ok<AGROW>
+        end
+    end
+
+    if isempty(snrVec)
+        error('No SNR values found in %s', summaryFile);
+    end
+
+    snrVec = sort(snrVec(:));
+end

@@ -4,6 +4,10 @@ simParameters = struct();       % Clear simParameters variable to contain all ke
 simParameters.NFrames = 1000;      % Number of 10 ms frames
 % simParameters.SNRIn = [linspace(-10.5,6.5, 16) 6.8 7.8 8.5 8.9 9.3]; % SNR range (dB)
 simParameters.SNRIn = [0 12.46 linspace(22.5,30, 3)]; % SNR range (dB)
+simParameters.CorrPlotSNRdB = simParameters.SNRIn(2); % SNR point used for temporal channel-correlation plot
+simParameters.CorrMaxLag = 30;                        % Max lag in slots for correlation plot
+simParameters.CorrObsStartSlot = 1;                  % 1-based slot index for tunable observation window
+simParameters.CorrObsNumSlots = 500;                 % Number of slots in observation window (inf -> full)
 
 %% Channel Estimator Configuration
 % The logical variable |PerfectChannelEstimator| controls channel
@@ -116,7 +120,7 @@ simParameters.PDSCHExtension.PRGBundleSize = [];     % 2, 4, or [] to signify "w
 % HARQ process and rate matching/TBS parameters
 simParameters.PDSCHExtension.XOverhead = 6*simParameters.PDSCH.EnablePTRS; % Set PDSCH rate matching overhead for TBS (Xoh) to 6 when PT-RS is enabled, otherwise 0
 simParameters.PDSCHExtension.NHARQProcesses = 16;    % Number of parallel HARQ processes to use
-simParameters.PDSCHExtension.EnableHARQ = "IR";      % Enable retransmissions for each process, using RV sequence [0,2,3,1]
+simParameters.PDSCHExtension.EnableHARQ = "CC";      % Enable retransmissions for each process, using RV sequence [0,2,3,1]
 if simParameters.PDSCHExtension.EnableHARQ=="IR"
     % In the final report of RAN WG1 meeting #91 (R1-1719301), it was
     % observed in R1-1717405 that if performance is the priority, [0 2 3 1]
@@ -127,7 +131,7 @@ if simParameters.PDSCHExtension.EnableHARQ=="IR"
     % rvSeq = [0 2];
 
 elseif simParameters.PDSCHExtension.EnableHARQ=="CC"
-    rvSeq = [0 0]; % Chase combining - all transmissions use RV=0
+    rvSeq = [0 0 0 0]; % Chase combining - all transmissions use RV=0
 else
     % HARQ disabled - single transmission with RV=0, no retransmissions
     rvSeq = 0;
@@ -281,6 +285,10 @@ end
 
 % Initialize cell array to collect retransmission data from each SNR point
 retransInfoAll = cell(numel(simParameters.SNRIn), 1);
+channelTraceAll = cell(numel(simParameters.SNRIn), 1);
+txNumTraceAll = cell(numel(simParameters.SNRIn), 1);
+errStateTraceAll = cell(numel(simParameters.SNRIn), 1);
+harqProcTraceAll = cell(numel(simParameters.SNRIn), 1);
 
 parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel computing
 % parfor snrIdx = 1:numel(simParameters.SNRIn) % uncomment for parallel computing
@@ -358,6 +366,10 @@ parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel com
     
     % Total number of slots in the simulation period
     NSlots = simLocal.NFrames * carrier.SlotsPerFrame;
+    channelCoeffTrace = complex(zeros(NSlots,1));
+    txNumTrace = NaN(NSlots, 1);
+    errStateTrace = NaN(NSlots, 1);
+    harqProcTrace = NaN(NSlots, 1);
     
     % Obtain a precoding matrix (wtx) to be used in the transmission of the
     % first transport block (use local channel instance)
@@ -434,6 +446,7 @@ parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel com
         % spread
         txWaveform = [txWaveform; zeros(maxChDelay,size(txWaveform,2))]; %#ok<AGROW>
     [rxWaveform,pathGains,sampleTimes] = channelLocal(txWaveform);
+        channelCoeffTrace(nslot+1) = extractInstantaneousChannelCoeff(pathGains);
         
         % Add AWGN to the received time domain waveform
         % Normalize noise power by the IFFT size used in OFDM modulation,
@@ -606,6 +619,7 @@ parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel com
         % Decode the DL-SCH transport channel
         decodeDLSCHLocal.TransportBlockLength = trBlkSizes;
         [decbits,blkerr] = decodeDLSCHLocal(dlschLLRs,pdsch.Modulation,pdsch.NumLayers,harqEntity.RedundancyVersion,harqEntity.HARQProcessID);
+        harqProcTrace(nslot+1) = harqEntity.HARQProcessID + 1;
         
         % Record retransmission data for each codeword
         for cwIdx = 1:pdsch.NumCodewords
@@ -614,6 +628,10 @@ parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel com
             packetID = tbIDByProc(procID+1, cwIdx);
             % Transmission number (0-based) for this codeword
             retransNum = harqEntity.TransmissionNumber(cwIdx);
+            if cwIdx == 1
+                txNumTrace(nslot+1) = retransNum;
+                errStateTrace(nslot+1) = blkerr(cwIdx);
+            end
             % Compute representative SINR (average over received symbols)
             signalPower = mean(cellfun(@(x) mean(abs(x).^2), rxSymbols));
             noisePower = noiseEst; % noiseEst is a scalar estimate
@@ -646,12 +664,29 @@ parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel com
      
     % Store retransmission data for this SNR point
     retransInfoAll{snrIdx} = retransInfo;
+    channelTraceAll{snrIdx} = channelCoeffTrace;
+    txNumTraceAll{snrIdx} = txNumTrace;
+    errStateTraceAll{snrIdx} = errStateTrace;
+    harqProcTraceAll{snrIdx} = harqProcTrace;
 end
 
 % Save retransmission data to MAT files after parallel processing
 for idx = 1:numel(simParameters.SNRIn)
     retransInfo = retransInfoAll{idx};
-    save(fullfile(resultsDir, sprintf('retrans_snr_%d.mat', idx)), 'retransInfo');
+    channelCoeffTrace = channelTraceAll{idx};
+    txNumTrace = txNumTraceAll{idx};
+    errStateTrace = errStateTraceAll{idx};
+    harqProcTrace = harqProcTraceAll{idx};
+    snrValue = simParameters.SNRIn(idx);
+    slotDurationMs = 10 / simParameters.Carrier.SlotsPerFrame;
+    save(fullfile(resultsDir, sprintf('retrans_snr_%d.mat', idx)), ...
+         'retransInfo', ...
+         'channelCoeffTrace', ...
+         'txNumTrace', ...
+         'errStateTrace', ...
+         'harqProcTrace', ...
+         'snrValue', ...
+         'slotDurationMs');
 end
 
 %% Results
@@ -702,6 +737,110 @@ title(sprintf('%s (%dx%d) / NRB=%d / SCS=%dkHz', ...
 
 % Save the BLER plot
 saveas(gcf, fullfile(resultsDir, 'bler_plot.png'));
+
+% Plot temporal correlation of instantaneous channel realization for one SNR
+[~, corrSnrIdx] = min(abs(simParameters.SNRIn - simParameters.CorrPlotSNRdB));
+corrSnrVal = simParameters.SNRIn(corrSnrIdx);
+hSeriesFull = channelTraceAll{corrSnrIdx};
+if isempty(hSeriesFull) || all(~isfinite(hSeriesFull))
+    warning('No channel trace data found for SNR %.2f dB. Skip temporal-correlation plot.', corrSnrVal);
+else
+    txNumSeriesFull = txNumTraceAll{corrSnrIdx};
+    harqProcSeriesFull = harqProcTraceAll{corrSnrIdx};
+    errStateSeriesFull = errStateTraceAll{corrSnrIdx};
+
+    nCommon = min([numel(hSeriesFull), numel(txNumSeriesFull), numel(errStateSeriesFull), numel(harqProcSeriesFull)]);
+    if nCommon <= 1
+        warning('Insufficient aligned trace length for SNR %.2f dB. Skip channel-trace plots.', corrSnrVal);
+    else
+        hSeriesFull = hSeriesFull(1:nCommon);
+        txNumSeriesFull = txNumSeriesFull(1:nCommon);
+        errStateSeriesFull = errStateSeriesFull(1:nCommon);
+        harqProcSeriesFull = harqProcSeriesFull(1:nCommon);
+
+        obsStart = max(1, round(simParameters.CorrObsStartSlot));
+        obsStart = min(obsStart, nCommon);
+        if ~isfinite(simParameters.CorrObsNumSlots) || (simParameters.CorrObsNumSlots <= 0)
+            obsNum = nCommon - obsStart + 1;
+        else
+            obsNum = min(max(1, round(simParameters.CorrObsNumSlots)), nCommon - obsStart + 1);
+        end
+        obsEnd = obsStart + obsNum - 1;
+        obsIdx = (obsStart:obsEnd).';
+
+        hSeriesObs = hSeriesFull(obsIdx);
+        txNumSeriesObs = txNumSeriesFull(obsIdx);
+        errStateSeriesObs = errStateSeriesFull(obsIdx);
+        harqProcSeriesObs = harqProcSeriesFull(obsIdx);
+
+        slotDurMs = 10 / simParameters.Carrier.SlotsPerFrame;
+        tMsFull = (0:nCommon-1).' * slotDurMs;
+        tMsObs = tMsFull(obsIdx);
+
+        % Tunable observation-window temporal correlation (display figure)
+        maxLagObs = min(simParameters.CorrMaxLag, numel(hSeriesObs)-1);
+        [lagsObs, corrValObs] = temporalCorrelation(hSeriesObs, maxLagObs);
+        lagObsMs = lagsObs * slotDurMs;
+
+        figure('Name', sprintf('Instantaneous Channel Temporal Correlation (SNR=%.2f dB, slots %d-%d)', ...
+               corrSnrVal, obsStart, obsEnd), ...
+               'Position', [120 120 900 500]);
+        plot(lagObsMs, real(corrValObs), 's--', 'LineWidth', 1.4, 'DisplayName', 'Re\{R_h(\tau)\}');
+        grid on;
+        xlabel('Lag (ms)', 'FontWeight', 'bold');
+        ylabel('Normalized Correlation', 'FontWeight', 'bold');
+        title(sprintf('Instantaneous Channel Temporal Correlation @ SNR %.2f dB (slots %d-%d)', ...
+              corrSnrVal, obsStart, obsEnd), 'FontWeight', 'bold');
+        legend('Location', 'best');
+        set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+
+        % Full-window temporal correlation (save all window)
+        maxLagFull = min(simParameters.CorrMaxLag, numel(hSeriesFull)-1);
+        [lagsFull, corrValFull] = temporalCorrelation(hSeriesFull, maxLagFull);
+        lagFullMs = lagsFull * slotDurMs;
+        figCorrFull = figure('Visible', 'off', ...
+               'Name', sprintf('Instantaneous Channel Temporal Correlation Full (SNR=%.2f dB)', corrSnrVal), ...
+               'Position', [120 120 900 500]);
+        plot(lagFullMs, real(corrValFull), 's--', 'LineWidth', 1.4, 'DisplayName', 'Re\{R_h(\tau)\}');
+        grid on;
+        xlabel('Lag (ms)', 'FontWeight', 'bold');
+        ylabel('Normalized Correlation', 'FontWeight', 'bold');
+        title(sprintf('Instantaneous Channel Temporal Correlation @ SNR %.2f dB (Full Transmission)', corrSnrVal), 'FontWeight', 'bold');
+        legend('Location', 'best');
+        set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+        saveas(figCorrFull, fullfile(resultsDir, sprintf('channel_temporal_correlation_snr_%0.2f.png', corrSnrVal)));
+        close(figCorrFull);
+
+        % Tunable observation-window |h[n]| plot (display figure)
+        absHFull_dB = 20 * log10(max(abs(hSeriesFull), eps));
+        absHObs_dB = absHFull_dB(obsIdx);
+        figure('Name', sprintf('|h[n]| vs Time (SNR=%.2f dB, slots %d-%d)', corrSnrVal, obsStart, obsEnd), ...
+               'Position', [140 140 980 540]);
+        plotHTraceWithTxErrHarq(tMsObs, absHObs_dB, txNumSeriesObs, errStateSeriesObs, harqProcSeriesObs);
+        grid on;
+        xlabel('Time (ms)', 'FontWeight', 'bold');
+        ylabel('|h[n]| (dB)', 'FontWeight', 'bold');
+        title(sprintf('|h[n]| (dB) @ SNR %.2f dB (slots %d-%d; color=Tx n, marker=errorState, text=HARQ Proc)', ...
+              corrSnrVal, obsStart, obsEnd), 'FontWeight', 'bold');
+        legend('Location', 'best');
+        set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+
+        % Full-window |h[n]| plot (save all window)
+        figHFull = figure('Visible', 'off', ...
+               'Name', sprintf('|h[n]| vs Time with Tx n, errorState, HARQ Proc text Full (SNR=%.2f dB)', corrSnrVal), ...
+               'Position', [140 140 980 540]);
+        plotHTraceWithTxErrHarq(tMsFull, absHFull_dB, txNumSeriesFull, errStateSeriesFull, harqProcSeriesFull);
+        grid on;
+        xlabel('Time (ms)', 'FontWeight', 'bold');
+        ylabel('|h[n]| (dB)', 'FontWeight', 'bold');
+        title(sprintf('|h[n]| (dB) over Full Transmission @ SNR %.2f dB (color=Tx n, marker=errorState, text=HARQ Proc)', corrSnrVal), ...
+              'FontWeight', 'bold');
+        legend('Location', 'best');
+        set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+        saveas(figHFull, fullfile(resultsDir, sprintf('h_n_abs_db_vs_time_by_txn_err_harqtext_snr_%0.2f.png', corrSnrVal)));
+        close(figHFull);
+    end
+end
 
 % Bundle key parameters and results into a combined structure for recording
 simResults.simParameters = simParameters;
@@ -833,4 +972,113 @@ function plotLayerEVM(NSlots,nslot,pdsch,siz,pdschIndices,pdschSymbols,pdschEq)
     
     drawnow;
     
+end
+
+function h = extractInstantaneousChannelCoeff(pathGains)
+% Return one representative instantaneous complex channel coefficient
+% from pathGains at the center sample, first path, first antenna pair.
+
+    if isempty(pathGains)
+        h = complex(NaN, NaN);
+        return;
+    end
+
+    sz = size(pathGains);
+    idx = repmat({1}, 1, ndims(pathGains));
+    idx{1} = max(1, round(sz(1)/2)); % center sample in time
+    h = pathGains(idx{:});
+    h = complex(double(h));
+end
+
+function plotHTraceWithTxErrHarq(tMs, absH_dB, txNumSeries, errStateSeries, harqProcSeries)
+% Plot |h[n]| trace with color-coded Tx number, marker-coded error state,
+% and HARQ process text labels.
+
+    nCommon = min([numel(tMs), numel(absH_dB), numel(txNumSeries), numel(errStateSeries), numel(harqProcSeries)]);
+    if nCommon < 1
+        return;
+    end
+    tMs = tMs(1:nCommon);
+    absH_dB = absH_dB(1:nCommon);
+    txNumSeries = txNumSeries(1:nCommon);
+    errStateSeries = errStateSeries(1:nCommon);
+    harqProcSeries = harqProcSeries(1:nCommon);
+
+    hold on;
+    cmapTx = lines(4);
+    markerByErr = {'o', 's'}; % err=0 -> circle, err=1 -> square
+    finiteMask = isfinite(absH_dB);
+
+    for n = 0:3
+        for e = 0:1
+            idx_ne = (txNumSeries == n) & (errStateSeries == e) & finiteMask;
+            if any(idx_ne)
+                scatter(tMs(idx_ne), absH_dB(idx_ne), 30, ...
+                        'Marker', markerByErr{e+1}, ...
+                        'MarkerFaceColor', cmapTx(n+1,:), ...
+                        'MarkerEdgeColor', cmapTx(n+1,:), ...
+                        'HandleVisibility', 'off');
+            end
+        end
+    end
+
+    % Legend proxies: 4 colors for Tx n and marker coding for errorState
+    for n = 0:3
+        plot(NaN, NaN, 'o', 'Color', cmapTx(n+1,:), ...
+             'MarkerFaceColor', cmapTx(n+1,:), ...
+             'DisplayName', sprintf('Tx n=%d', n));
+    end
+    plot(NaN, NaN, 'ko', 'MarkerFaceColor', 'k', 'DisplayName', 'errorState=0');
+    plot(NaN, NaN, 'ks', 'MarkerFaceColor', 'k', 'DisplayName', 'errorState=1');
+
+    % Annotate each slot with HARQ process ID (p1..p16)
+    validIdx = find(finiteMask & isfinite(txNumSeries) & isfinite(errStateSeries) & isfinite(harqProcSeries));
+    if isempty(validIdx)
+        return;
+    end
+
+    ySpan = max(absH_dB(validIdx)) - min(absH_dB(validIdx));
+    xSpan = max(tMs(validIdx)) - min(tMs(validIdx));
+    yOff = 0;
+    xOff = 0;
+    if ySpan > 0
+        yOff = 0.015 * ySpan;
+    end
+    if xSpan > 0
+        xOff = 0.002 * xSpan;
+    end
+
+    for ii = validIdx(:).'
+        text(tMs(ii) + xOff, absH_dB(ii) + yOff, ...
+             sprintf('p%d', harqProcSeries(ii)), ...
+             'FontSize', 7, 'Color', [0.25 0.25 0.25], ...
+             'HorizontalAlignment', 'center');
+    end
+end
+
+function [lags, rho] = temporalCorrelation(hSeries, maxLag)
+% Compute normalized temporal autocorrelation rho(lag) for complex series.
+
+    x = hSeries(:);
+    x = x(isfinite(real(x)) & isfinite(imag(x)));
+    if isempty(x)
+        lags = 0;
+        rho = complex(NaN, NaN);
+        return;
+    end
+
+    x = x - mean(x);
+    den = sum(abs(x).^2);
+    if den <= 0
+        lags = (0:maxLag).';
+        rho = complex(NaN(size(lags)), NaN(size(lags)));
+        return;
+    end
+
+    maxLag = min(maxLag, numel(x)-1);
+    lags = (0:maxLag).';
+    rho = complex(zeros(maxLag+1,1));
+    for k = 0:maxLag
+        rho(k+1) = sum(x(1+k:end) .* conj(x(1:end-k))) / den;
+    end
 end

@@ -1,8 +1,11 @@
 %% NR PDSCH Throughput 
 
 simParameters = struct();       % Clear simParameters variable to contain all key simulation parameters 
-simParameters.NFrames = 100;      % Number of 10 ms frames
-simParameters.SNRIn = linspace(-12,2,15); % SNR range (dB)
+simParameters.NFrames = 10;      % Number of 10 ms frames
+% simParameters.SNRIn = [linspace(-10.5,6.5, 16) 6.8 7.8 8.5 8.9 9.3]; % SNR range (dB)
+simParameters.SNRIn = [0 12.46 linspace(22.5,30, 3)]; % SNR range (dB)
+simParameters.CorrPlotSNRdB = simParameters.SNRIn(2); % SNR point used for temporal channel-correlation plot
+simParameters.CorrMaxLag = 30;                        % Max lag in slots for correlation plot
 
 %% Channel Estimator Configuration
 % The logical variable |PerfectChannelEstimator| controls channel
@@ -81,8 +84,8 @@ if simParameters.PDSCH.NumCodewords > 1                             % Multicodew
     simParameters.PDSCH.Modulation = {'16QAM','16QAM'};             % 'QPSK', '16QAM', '64QAM', '256QAM'
     simParameters.PDSCHExtension.TargetCodeRate = [490 490]/1024;   % Code rate used to calculate transport block sizes
 else
-    simParameters.PDSCH.Modulation = 'QPSK';                       % 'QPSK', '16QAM', '64QAM', '256QAM'
-    simParameters.PDSCHExtension.TargetCodeRate = 308/1024;         % Code rate used to calculate transport block sizes
+    simParameters.PDSCH.Modulation = '64QAM';                       % 'QPSK', '16QAM', '64QAM', '256QAM'
+    simParameters.PDSCHExtension.TargetCodeRate = 772/1024;         % Code rate used to calculate transport block sizes
 end
 
 % DM-RS and antenna port configuration (TS 38.211 Section 7.4.1.1)
@@ -115,7 +118,7 @@ simParameters.PDSCHExtension.PRGBundleSize = [];     % 2, 4, or [] to signify "w
 % HARQ process and rate matching/TBS parameters
 simParameters.PDSCHExtension.XOverhead = 6*simParameters.PDSCH.EnablePTRS; % Set PDSCH rate matching overhead for TBS (Xoh) to 6 when PT-RS is enabled, otherwise 0
 simParameters.PDSCHExtension.NHARQProcesses = 16;    % Number of parallel HARQ processes to use
-simParameters.PDSCHExtension.EnableHARQ = "IR";      % Enable retransmissions for each process, using RV sequence [0,2,3,1]
+simParameters.PDSCHExtension.EnableHARQ = "CC";      % Enable retransmissions for each process, using RV sequence [0,2,3,1]
 if simParameters.PDSCHExtension.EnableHARQ=="IR"
     % In the final report of RAN WG1 meeting #91 (R1-1719301), it was
     % observed in R1-1717405 that if performance is the priority, [0 2 3 1]
@@ -123,6 +126,8 @@ if simParameters.PDSCHExtension.EnableHARQ=="IR"
     % taken into account that the upper limit of the code rate at which
     % each RV is self-decodable is in the following order: 0>3>2>1
     rvSeq = [0 2 3 1];
+    % rvSeq = [0 2];
+
 elseif simParameters.PDSCHExtension.EnableHARQ=="CC"
     rvSeq = [0 0 0 0]; % Chase combining - all transmissions use RV=0
 else
@@ -149,8 +154,8 @@ simParameters.DataType = 'single';
 
 % Define the general CDL/TDL propagation channel parameters
 simParameters.DelayProfile = 'CDL-C';   % Use CDL-C model (Urban macrocell model)
-simParameters.DelaySpread = 300e-9;
-simParameters.MaximumDopplerShift = 5; 
+simParameters.DelaySpread = 300e-9;   % Channel delay spread (seconds)
+simParameters.MaximumDopplerShift = 100; 
 
 % Cross-check the PDSCH layering against the channel geometry 
 validateNumLayers(simParameters);
@@ -278,8 +283,10 @@ end
 
 % Initialize cell array to collect retransmission data from each SNR point
 retransInfoAll = cell(numel(simParameters.SNRIn), 1);
+channelTraceAll = cell(numel(simParameters.SNRIn), 1);
+txNumTraceAll = cell(numel(simParameters.SNRIn), 1);
 
-for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel computing
+parfor snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel computing
 % parfor snrIdx = 1:numel(simParameters.SNRIn) % uncomment for parallel computing
 % To reduce the total simulation time, you can execute this loop in
 % parallel by using the Parallel Computing Toolbox. Comment out the 'for'
@@ -355,6 +362,8 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
     
     % Total number of slots in the simulation period
     NSlots = simLocal.NFrames * carrier.SlotsPerFrame;
+    channelCoeffTrace = complex(zeros(NSlots,1));
+    txNumTrace = NaN(NSlots, 1);
     
     % Obtain a precoding matrix (wtx) to be used in the transmission of the
     % first transport block (use local channel instance)
@@ -431,6 +440,7 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
         % spread
         txWaveform = [txWaveform; zeros(maxChDelay,size(txWaveform,2))]; %#ok<AGROW>
     [rxWaveform,pathGains,sampleTimes] = channelLocal(txWaveform);
+        channelCoeffTrace(nslot+1) = extractInstantaneousChannelCoeff(pathGains);
         
         % Add AWGN to the received time domain waveform
         % Normalize noise power by the IFFT size used in OFDM modulation,
@@ -513,7 +523,7 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
         end
 
         % Compute SINR per subcarrier using channel estimates
-        % gridSize = [carrier.NSizeGrid * 12, carrier.SymbolsPerSlot, pdsch.NumLayers];
+        gridSize = [carrier.NSizeGrid * 12, carrier.SymbolsPerSlot, pdsch.NumLayers];
         % [k_indices, ~, p_layer] = ind2sub(gridSize, pdschIndices);
         % unique_subcarriers = unique(k_indices);
         % sinr_per_subcarrier = zeros(length(unique_subcarriers), pdsch.NumLayers);
@@ -534,20 +544,18 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
         % gridSize = [carrier.NSizeGrid*12, carrier.SymbolsPerSlot, pdsch.NumLayers];
         % pdschIndices, pdschHest (size: numRE x NumLayers), noiseEst
 
-        [k_idx, ~, p_layer] = ind2sub(gridSize, pdschIndices);
-        unique_subcarriers = unique(k_idx);   % only the ones used
-        nL = pdsch.NumLayers;
-        
-        % Flatten RE powers into a vector
-        lin = sub2ind(size(pdschHest), (1:numel(k_idx)).', p_layer);
-        v   = abs(pdschHest(lin)).^2;
-        
-        % Aggregate sum of power by (subcarrier,layer)
-        Psum = accumarray([k_idx(:) p_layer(:)], v(:), [], @sum, NaN);
-        
-        % Extract only rows for the used subcarriers
-        sinr_per_subcarrier = 10*log10(Psum(unique_subcarriers,:) / noiseEst);
-        
+        [k_idx, ~, p_layer] = ind2sub(gridSize, pdschIndices);   % size: numRE x 1
+        nSC = carrier.NSizeGrid * 12;
+        nL  = pdsch.NumLayers;
+
+        % Map each RE to the right h_est coefficient
+        lin = unique(k_idx);
+        v   = abs(pdschHest(lin)).^2;                 % per-RE power
+
+        % If you don’t want average → just keep Psum
+        % If you want SINR per RE (not averaged), compute directly:
+        sinr_per_re = 10*log10(v / noiseEst);         % vector, same length as pdschIndices
+
         % Equalization
         [pdschEq,csi] = nrEqualizeMMSE(pdschRx,pdschHest,noiseEst);
 
@@ -613,12 +621,15 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
             packetID = tbIDByProc(procID+1, cwIdx);
             % Transmission number (0-based) for this codeword
             retransNum = harqEntity.TransmissionNumber(cwIdx);
+            if cwIdx == 1
+                txNumTrace(nslot+1) = retransNum;
+            end
             % Compute representative SINR (average over received symbols)
             signalPower = mean(cellfun(@(x) mean(abs(x).^2), rxSymbols));
             noisePower = noiseEst; % noiseEst is a scalar estimate
             sinr_linear = signalPower / noisePower;
             sinr_dB = 10 * log10(sinr_linear);
-            retransInfo = [retransInfo, struct('packetID', packetID, 'retransNum', retransNum, 'errorState', blkerr(cwIdx), 'sinr', sinr_dB, 'sinr_per_subcarrier', sinr_per_subcarrier, 'subcarrier_indices', unique_subcarriers)];
+            retransInfo = [retransInfo, struct('packetID', packetID, 'retransNum', retransNum, 'errorState', blkerr(cwIdx), 'sinr', sinr_dB, 'sinr_per_re', sinr_per_re, 'subcarrier_indices', lin)];
         end
         
         % Store values to calculate throughput
@@ -645,6 +656,8 @@ for snrIdx = 1:numel(simParameters.SNRIn)      % comment out for parallel comput
      
     % Store retransmission data for this SNR point
     retransInfoAll{snrIdx} = retransInfo;
+    channelTraceAll{snrIdx} = channelCoeffTrace;
+    txNumTraceAll{snrIdx} = txNumTrace;
 end
 
 % Save retransmission data to MAT files after parallel processing
@@ -701,6 +714,61 @@ title(sprintf('%s (%dx%d) / NRB=%d / SCS=%dkHz', ...
 
 % Save the BLER plot
 saveas(gcf, fullfile(resultsDir, 'bler_plot.png'));
+
+% Plot temporal correlation of instantaneous channel realization for one SNR
+[~, corrSnrIdx] = min(abs(simParameters.SNRIn - simParameters.CorrPlotSNRdB));
+corrSnrVal = simParameters.SNRIn(corrSnrIdx);
+hSeries = channelTraceAll{corrSnrIdx};
+if isempty(hSeries) || all(~isfinite(hSeries))
+    warning('No channel trace data found for SNR %.2f dB. Skip temporal-correlation plot.', corrSnrVal);
+else
+    maxLag = min(simParameters.CorrMaxLag, numel(hSeries)-1);
+    [lags, corrVal] = temporalCorrelation(hSeries, maxLag);
+    slotDurMs = 10 / simParameters.Carrier.SlotsPerFrame;
+    lagMs = lags * slotDurMs;
+
+    figure('Name', sprintf('Instantaneous Channel Temporal Correlation (SNR=%.2f dB)', corrSnrVal), ...
+           'Position', [120 120 900 500]);
+    % plot(lagMs, abs(corrVal), 'o-', 'LineWidth', 1.8, 'DisplayName', '|R_h(\tau)|'); hold on;
+    plot(lagMs, real(corrVal), 's--', 'LineWidth', 1.4, 'DisplayName', 'Re\{R_h(\tau)\}');
+    grid on;
+    xlabel('Lag (ms)', 'FontWeight', 'bold');
+    ylabel('Normalized Correlation', 'FontWeight', 'bold');
+    title(sprintf('Instantaneous Channel Temporal Correlation @ SNR %.2f dB', corrSnrVal), 'FontWeight', 'bold');
+    legend('Location', 'best');
+    set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+    saveas(gcf, fullfile(resultsDir, sprintf('channel_temporal_correlation_snr_%0.2f.png', corrSnrVal)));
+
+    % Plot |h[n]| vs time, with colors by Tx n (0..3)
+    tMs = (0:numel(hSeries)-1).' * slotDurMs;
+    txNumSeries = txNumTraceAll{corrSnrIdx};
+    absH = abs(hSeries);
+    figure('Name', sprintf('|h[n]| vs Time Colored by Tx n (SNR=%.2f dB)', corrSnrVal), ...
+           'Position', [140 140 980 540]);
+    hold on;
+    cmapTx = lines(4);
+    for n = 0:3
+        idx_n = (txNumSeries == n) & isfinite(absH);
+        if any(idx_n)
+            scatter(tMs(idx_n), absH(idx_n), 28, ...
+                    'MarkerFaceColor', cmapTx(n+1,:), ...
+                    'MarkerEdgeColor', cmapTx(n+1,:), ...
+                    'DisplayName', sprintf('Tx n=%d', n));
+        else
+            plot(NaN, NaN, 'o', 'Color', cmapTx(n+1,:), ...
+                 'MarkerFaceColor', cmapTx(n+1,:), ...
+                 'DisplayName', sprintf('Tx n=%d (none)', n));
+        end
+    end
+    grid on;
+    xlabel('Time (ms)', 'FontWeight', 'bold');
+    ylabel('|h[n]|', 'FontWeight', 'bold');
+    title(sprintf('|h[n]| over Full Transmission @ SNR %.2f dB (colored by Tx n)', corrSnrVal), ...
+          'FontWeight', 'bold');
+    legend('Location', 'best');
+    set(gca, 'FontSize', 12, 'FontWeight', 'bold');
+    saveas(gcf, fullfile(resultsDir, sprintf('h_n_abs_vs_time_by_txn_snr_%0.2f.png', corrSnrVal)));
+end
 
 % Bundle key parameters and results into a combined structure for recording
 simResults.simParameters = simParameters;
@@ -832,4 +900,47 @@ function plotLayerEVM(NSlots,nslot,pdsch,siz,pdschIndices,pdschSymbols,pdschEq)
     
     drawnow;
     
+end
+
+function h = extractInstantaneousChannelCoeff(pathGains)
+% Return one representative instantaneous complex channel coefficient
+% from pathGains at the center sample, first path, first antenna pair.
+
+    if isempty(pathGains)
+        h = complex(NaN, NaN);
+        return;
+    end
+
+    sz = size(pathGains);
+    idx = repmat({1}, 1, ndims(pathGains));
+    idx{1} = max(1, round(sz(1)/2)); % center sample in time
+    h = pathGains(idx{:});
+    h = complex(double(h));
+end
+
+function [lags, rho] = temporalCorrelation(hSeries, maxLag)
+% Compute normalized temporal autocorrelation rho(lag) for complex series.
+
+    x = hSeries(:);
+    x = x(isfinite(real(x)) & isfinite(imag(x)));
+    if isempty(x)
+        lags = 0;
+        rho = complex(NaN, NaN);
+        return;
+    end
+
+    x = x - mean(x);
+    den = sum(abs(x).^2);
+    if den <= 0
+        lags = (0:maxLag).';
+        rho = complex(NaN(size(lags)), NaN(size(lags)));
+        return;
+    end
+
+    maxLag = min(maxLag, numel(x)-1);
+    lags = (0:maxLag).';
+    rho = complex(zeros(maxLag+1,1));
+    for k = 0:maxLag
+        rho(k+1) = sum(x(1+k:end) .* conj(x(1:end-k))) / den;
+    end
 end

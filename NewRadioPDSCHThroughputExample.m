@@ -3,7 +3,7 @@
 simParameters = struct();       % Clear simParameters variable to contain all key simulation parameters 
 simParameters.NFrames = 1000;      % Number of 10 ms frames
 % simParameters.SNRIn = [linspace(-10.5,6.5, 16) 6.8 7.8 8.5 8.9 9.3]; % SNR range (dB)
-simParameters.SNRIn = [0 12.46 linspace(22.5,30, 3)]; % SNR range (dB)
+simParameters.SNRIn = [0 8 12.46 17 22.5 26.5]; % SNR range (dB)
 simParameters.CorrPlotSNRdB = simParameters.SNRIn(2); % SNR point used for temporal channel-correlation plot
 simParameters.CorrMaxLag = 30;                        % Max lag in slots for correlation plot
 simParameters.CorrObsStartSlot = 1;                  % 1-based slot index for tunable observation window
